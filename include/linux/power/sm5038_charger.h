@@ -434,6 +434,7 @@ struct sm5038_charger_data {
 	int			learned_capacity_raw;
 	int			learning_counter;
 	int			batt_unaged;
+	bool			learned_capacity_seeded;
 
 	/* thermal mitigation */
 	struct somc_thermal_mitigation	therm_mitig[NUM_THERM_MITIG_STEPS];

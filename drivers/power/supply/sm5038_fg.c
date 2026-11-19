@@ -742,10 +742,15 @@ int somc_sm5038_fg_learn_update(void)
 	u16 qage;
 	int ret, limit_gap, high_add, low_add, initial_qage;
 
+	if (fuelgauge == NULL)
+		return -ENODEV;
+
 	initial_qage = (fuelgauge->init_data.q_max * 1000) >> 11;
 
 	ret = sm5038_fg_read_sram(fuelgauge, SM5038_FG_ADDR_SRAM_QAGE);
 	somc_sm5038_fg_dbg(fuelgauge, PR_LEARN, "QAGE:0x%04x", ret);
+	if (ret < 0)
+		return ret;
 	if (ret == 0) {
 		qage = initial_qage;
 		if (fuelgauge->info.q_max != qage)

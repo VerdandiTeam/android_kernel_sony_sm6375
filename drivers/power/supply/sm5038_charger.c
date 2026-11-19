@@ -347,17 +347,11 @@ static void somc_sm5038_update_charge_full(struct sm5038_charger_data *charger)
 	}
 
 	learned_capacity = learned_capacity_raw;
-	/* Filter(2): Adjust for aged battery by vendor spec */
-	if ((u64)learned_capacity * 1000 / charge_full_design <
-						SOMC_LEARN_VENDOR_ADJUST_THR) {
-		learned_capacity_temp = learned_capacity;
-		learned_capacity = (int)((u64)learned_capacity_temp * 100 /
-									107);
-		somc_sm5038_charger_dbg(charger, PR_LEARN, "Filter(2): Adjust by Vendor algorithm. learned_capacity:%d->%d, learned_capacity_raw:%d",
-					learned_capacity_temp,
-					learned_capacity,
-					learned_capacity_raw);
-	}
+	/*
+	 * Filter(2) (vendor's extra -7% below 95% of design) is dropped:
+	 * report the fuel gauge's own estimate, consistent with the value
+	 * seeded at boot by somc_sm5038_seed_charge_full().
+	 */
 
 	/* Filter(3): Adjust by Aging Level */
 	if (charger->target_soc_adj_coef) {
@@ -407,6 +401,51 @@ static void somc_sm5038_update_charge_full(struct sm5038_charger_data *charger)
 	somc_sm5038_charger_dbg(charger, PR_LEARN, "learned_capacity_raw:%d, charge_full_temp:%d, learned_capacity%d, charge_full_design:%d",
 				learned_capacity_raw, charge_full_temp,
 				learned_capacity, charge_full_design);
+}
+
+/*
+ * Stock firmware relies on a userspace daemon to persist charge_full and
+ * write it back on boot. Without it, charge_full falls back to the design
+ * capacity until the next full-charge termination, and then only moves 2%
+ * per cycle. The fuel gauge keeps its learned capacity (QAGE) in SRAM across
+ * reboots, so seed charge_full from it once, bypassing the step filter.
+ */
+static void somc_sm5038_seed_charge_full(struct sm5038_charger_data *charger)
+{
+	int charge_full_design, learned_capacity_raw, lower_limit;
+
+	if (charger->learned_capacity_seeded || charger->batt_unaged)
+		return;
+
+	/* FG not ready or SRAM read failed: retry on the next main work run */
+	if (somc_sm5038_fg_learn_update() < 0)
+		return;
+
+	charger->learned_capacity_seeded = true;
+	/* Treat the current QAGE as consumed so full-charge learning only
+	 * reacts to new learning events.
+	 */
+	charger->learning_counter = somc_sm5038_fg_learn_get_counter();
+
+	learned_capacity_raw =
+			somc_sm5038_fg_learn_get_learned_capacity_raw() * 1000;
+	if (learned_capacity_raw <= 0) {
+		somc_sm5038_charger_dbg(charger, PR_LEARN, "No learned capacity in FG, keep design capacity");
+		return;
+	}
+	charger->learned_capacity_raw = learned_capacity_raw;
+
+	charge_full_design = somc_sm5038_get_charge_full_design(charger);
+	if (charge_full_design <= 0)
+		return;
+	lower_limit = charge_full_design * SOMC_LEARN_LOWER_LIMIT / 1000;
+
+	charger->learned_capacity = clamp(learned_capacity_raw, lower_limit,
+					  charge_full_design);
+
+	pr_info("%s: seeded charge_full:%d from FG learned_capacity_raw:%d, charge_full_design:%d\n",
+		__func__, charger->learned_capacity, learned_capacity_raw,
+		charge_full_design);
 }
 
 int somc_sm5038_present_is_pd_apdapter(void)
@@ -2930,6 +2969,9 @@ static void somc_sm5038_main_work(struct work_struct *work)
 		else
 			somc_sm5038_fg_learn_set_range(40, 93);
 	}
+
+	/* Needs the learning range above to scale QAGE correctly */
+	somc_sm5038_seed_charge_full(charger);
 
 	if (charger->charging_status == POWER_SUPPLY_STATUS_CHARGING &&
 		current_time - charger->last_psy_changed_time_ms >
